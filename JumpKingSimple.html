@@ -1,0 +1,1399 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1000m Hardcore Jump</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Consolas, "Courier New", monospace;
+      background: #11141c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, #22293a 0%, #11141c 62%);
+    }
+
+    .game-shell {
+      width: min(900px, calc(100vw - 24px));
+      user-select: none;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 9 / 7;
+      border: 1px solid #3a4052;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+      background: #1b202e;
+      outline: none;
+    }
+
+    .help {
+      margin-top: 8px;
+      color: #aeb7ca;
+      font-size: 13px;
+      line-height: 1.35;
+      text-align: center;
+    }
+
+    kbd {
+      padding: 1px 5px;
+      border: 1px solid #4b5367;
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      background: #252b3a;
+      color: #eef1f7;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <main class="game-shell">
+    <canvas
+      id="game"
+      width="900"
+      height="700"
+      tabindex="0"
+      aria-label="1000m Hardcore Jump game"
+    ></canvas>
+    <div class="help">
+      <kbd>A</kbd>/<kbd>D</kbd> or arrow keys — run and face,
+      <kbd>Space</kbd> — charge and release jump,
+      <kbd>R</kbd> — restart, <kbd>Esc</kbd> — pause.
+    </div>
+  </main>
+
+  <script>
+    "use strict";
+
+    // ========================================================
+    // CONFIG
+    // ========================================================
+
+    const SCREEN_WIDTH = 900;
+    const SCREEN_HEIGHT = 700;
+
+    const WORLD_WIDTH = 900;
+    const START_GROUND_Y = 620;
+    const MAX_HEIGHT_METERS = 1000;
+
+    // null = normal start.
+    // Example: 386 and 430 starts on the left 386 m platform.
+    const DEBUG_START_HEIGHT = null;
+    const DEBUG_START_X = 200;
+
+    const GRAVITY = 1800.0;
+
+    const PLAYER_WIDTH = 34;
+    const PLAYER_HEIGHT = 50;
+
+    const GROUND_ACCELERATION = 2200.0;
+    const MAX_RUN_SPEED = 280.0;
+    const GROUND_FRICTION = 2600.0;
+
+    const MIN_JUMP_SPEED = 480.0;
+    const MAX_JUMP_SPEED = 980.0;
+
+    const MIN_HORIZONTAL_JUMP_SPEED = 100.0;
+    const MAX_HORIZONTAL_JUMP_SPEED = 420.0;
+
+    const MAX_CHARGE_TIME = 1.2;
+
+    const WALL_BOUNCE_FACTOR = 0.82;
+    const WALL_BOUNCE_VERTICAL_KICK = 360.0;
+    const MAX_BOUNCE_UPWARD_SPEED = 1180.0;
+
+    const CEILING_BOUNCE_FACTOR = 0.45;
+
+    const CAMERA_SMOOTHING = 8.0;
+
+
+    // ========================================================
+    // COLORS
+    // ========================================================
+
+    const COLORS = {
+      sky: "rgb(27, 32, 46)",
+      sky2: "rgb(47, 55, 78)",
+      platform: "rgb(103, 119, 86)",
+      platformTop: "rgb(151, 169, 121)",
+      goal: "rgb(156, 123, 56)",
+      goalTop: "rgb(245, 211, 100)",
+      block: "rgb(76, 80, 94)",
+      blockEdge: "rgb(130, 139, 160)",
+      player: "rgb(221, 181, 108)",
+      playerOutline: "rgb(67, 49, 36)",
+      chargeBg: "rgb(50, 50, 60)",
+      chargeFill: "rgb(230, 168, 62)",
+      white: "rgb(240, 240, 240)",
+      black: "rgb(15, 15, 18)",
+      yellow: "rgb(240, 205, 90)",
+      green: "rgb(120, 235, 140)",
+      bounce: "rgb(245, 220, 120)"
+    };
+
+
+    // ========================================================
+    // HELPERS
+    // ========================================================
+
+    function clamp(value, minimum, maximum) {
+      return Math.max(minimum, Math.min(maximum, value));
+    }
+
+    function moveTowards(current, target, maxDelta) {
+      if (current < target) {
+        return Math.min(current + maxDelta, target);
+      }
+
+      if (current > target) {
+        return Math.max(current - maxDelta, target);
+      }
+
+      return target;
+    }
+
+    function heightToWorldY(heightMeters) {
+      return START_GROUND_Y - heightMeters * 10;
+    }
+
+    function positiveModulo(value, divisor) {
+      return ((value % divisor) + divisor) % divisor;
+    }
+
+    function rectsOverlap(a, b) {
+      return (
+        a.x < b.x + b.w &&
+        a.x + a.w > b.x &&
+        a.y < b.y + b.h &&
+        a.y + a.h > b.y
+      );
+    }
+
+    function roundedRectPath(ctx, x, y, w, h, radius) {
+      const r = Math.min(radius, w / 2, h / 2);
+
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+
+    // ========================================================
+    // LEVEL GEOMETRY
+    // ========================================================
+
+    class Platform {
+      constructor(x, y, width, height = 24, isGoal = false) {
+        this.rect = {
+          x: Math.round(x),
+          y: Math.round(y),
+          w: Math.round(width),
+          h: Math.round(height)
+        };
+
+        this.isGoal = isGoal;
+      }
+
+      draw(ctx, cameraY) {
+        const drawRect = {
+          x: this.rect.x,
+          y: Math.round(this.rect.y - cameraY),
+          w: this.rect.w,
+          h: this.rect.h
+        };
+
+        if (
+          drawRect.y + drawRect.h < -50 ||
+          drawRect.y > SCREEN_HEIGHT + 50
+        ) {
+          return;
+        }
+
+        ctx.fillStyle = this.isGoal
+          ? COLORS.goal
+          : COLORS.platform;
+
+        ctx.fillRect(
+          drawRect.x,
+          drawRect.y,
+          drawRect.w,
+          drawRect.h
+        );
+
+        ctx.fillStyle = this.isGoal
+          ? COLORS.goalTop
+          : COLORS.platformTop;
+
+        ctx.fillRect(
+          drawRect.x,
+          drawRect.y,
+          drawRect.w,
+          6
+        );
+      }
+    }
+
+
+    class SolidBlock {
+      constructor(x, y, width, height) {
+        this.rect = {
+          x: Math.round(x),
+          y: Math.round(y),
+          w: Math.round(width),
+          h: Math.round(height)
+        };
+      }
+
+      draw(ctx, cameraY) {
+        const drawRect = {
+          x: this.rect.x,
+          y: Math.round(this.rect.y - cameraY),
+          w: this.rect.w,
+          h: this.rect.h
+        };
+
+        if (
+          drawRect.y + drawRect.h < -50 ||
+          drawRect.y > SCREEN_HEIGHT + 50
+        ) {
+          return;
+        }
+
+        ctx.fillStyle = COLORS.block;
+        ctx.fillRect(
+          drawRect.x,
+          drawRect.y,
+          drawRect.w,
+          drawRect.h
+        );
+
+        ctx.strokeStyle = COLORS.blockEdge;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(
+          drawRect.x + 2,
+          drawRect.y + 2,
+          Math.max(0, drawRect.w - 4),
+          Math.max(0, drawRect.h - 4)
+        );
+
+        ctx.strokeStyle = COLORS.blockEdge;
+        ctx.lineWidth = 2;
+
+        const spacing = 34;
+
+        for (
+          let y = drawRect.y + 14;
+          y < drawRect.y + drawRect.h;
+          y += spacing
+        ) {
+          ctx.beginPath();
+          ctx.moveTo(drawRect.x + 6, y);
+          ctx.lineTo(drawRect.x + drawRect.w - 6, y);
+          ctx.stroke();
+        }
+      }
+    }
+
+
+    const LEVEL_DATA = [[650, 12, 240], [400, 25, 220], [180, 38, 210], [440, 51, 190], [690, 65, 190], [470, 79, 180], [220, 90, 220], [450, 100, 300], [190, 112, 180], [120, 126, 120], [320, 126, 105], [520, 126, 95], [720, 126, 90], [800, 142, 100], [610, 156, 95], [380, 170, 90], [160, 184, 100], [430, 200, 280], [680, 214, 150], [785, 226, 115], [540, 239, 110], [290, 252, 105], [90, 266, 115], [340, 279, 95], [590, 291, 90], [450, 300, 260], [720, 314, 150], [650, 345, 105], [410, 358, 90], [180, 372, 82], [430, 386, 88], [690, 386, 180], [500, 400, 230], [740, 413, 130], [520, 425, 85], [280, 438, 80], [90, 450, 78], [335, 462, 75], [585, 474, 72], [790, 486, 88], [520, 500, 240], [300, 512, 190], [120, 526, 110], [300, 526, 95], [490, 526, 85], [675, 526, 80], [815, 526, 72], [780, 542, 90], [560, 556, 82], [340, 570, 76], [150, 584, 82], [550, 600, 220], [780, 614, 110], [530, 628, 90], [280, 642, 85], [80, 655, 90], [330, 668, 78], [580, 681, 74], [800, 694, 70], [560, 700, 200], [340, 710, 120], [150, 718, 135], [250, 749, 95], [500, 762, 80], [760, 775, 72], [540, 788, 68], [500, 800, 180], [745, 812, 95], [520, 825, 72], [285, 838, 68], [80, 850, 70], [325, 862, 64], [570, 874, 64], [810, 886, 68], [555, 900, 170], [760, 912, 85], [560, 912, 72], [360, 912, 66], [160, 912, 64], [100, 930, 75], [350, 943, 66], [610, 956, 62], [820, 968, 18], [570, 980, 60], [320, 990, 18], [450, 1000, 260]];
+    const BLOCK_DATA = [[840, 300, 378, 40], [20, 700, 782, 42], [430, 844, 856, 48]];
+
+
+    function createLevel() {
+      const platforms = [
+        new Platform(
+          0,
+          START_GROUND_Y,
+          WORLD_WIDTH
+        )
+      ];
+
+      for (const [centerX, heightMeters, width] of LEVEL_DATA) {
+        const worldY = heightToWorldY(heightMeters);
+        const x = centerX - width / 2;
+
+        platforms.push(
+          new Platform(
+            x,
+            worldY,
+            width,
+            24,
+            heightMeters === MAX_HEIGHT_METERS
+          )
+        );
+      }
+
+      const blocks = [];
+
+      for (
+        const [x, lowerHeight, upperHeight, width]
+        of BLOCK_DATA
+      ) {
+        const topY = heightToWorldY(upperHeight);
+        const bottomY = heightToWorldY(lowerHeight);
+
+        blocks.push(
+          new SolidBlock(
+            x,
+            topY,
+            width,
+            bottomY - topY
+          )
+        );
+      }
+
+      return { platforms, blocks };
+    }
+
+
+    // ========================================================
+    // PLAYER
+    // ========================================================
+
+    class Player {
+      constructor(x, y) {
+        this.startX = Number(x);
+        this.startY = Number(y);
+
+        this.x = Number(x);
+        this.y = Number(y);
+
+        this.vx = 0.0;
+        this.vy = 0.0;
+
+        this.onGround = false;
+
+        this.charging = false;
+        this.chargeTime = 0.0;
+
+        this.facing = 1;
+
+        this.currentPlatform = null;
+
+        this.bounceFlashTimer = 0.0;
+        this.lastBounceSide = 0;
+      }
+
+      get rect() {
+        return {
+          x: Math.round(this.x),
+          y: Math.round(this.y),
+          w: PLAYER_WIDTH,
+          h: PLAYER_HEIGHT
+        };
+      }
+
+      reset() {
+        this.x = this.startX;
+        this.y = this.startY;
+
+        this.vx = 0.0;
+        this.vy = 0.0;
+
+        this.onGround = false;
+
+        this.charging = false;
+        this.chargeTime = 0.0;
+
+        this.facing = 1;
+        this.currentPlatform = null;
+
+        this.bounceFlashTimer = 0.0;
+        this.lastBounceSide = 0;
+      }
+
+      startCharge() {
+        if (!this.onGround || this.charging) {
+          return;
+        }
+
+        this.charging = true;
+        this.chargeTime = 0.0;
+        this.vx = 0.0;
+      }
+
+      releaseJump() {
+        if (!this.charging) {
+          return;
+        }
+
+        if (!this.onGround) {
+          this.charging = false;
+          this.chargeTime = 0.0;
+          return;
+        }
+
+        const chargeRatio = clamp(
+          this.chargeTime / MAX_CHARGE_TIME,
+          0.0,
+          1.0
+        );
+
+        const power = chargeRatio ** 0.75;
+
+        const verticalSpeed = (
+          MIN_JUMP_SPEED +
+          (
+            MAX_JUMP_SPEED -
+            MIN_JUMP_SPEED
+          ) * power
+        );
+
+        const horizontalSpeed = (
+          MIN_HORIZONTAL_JUMP_SPEED +
+          (
+            MAX_HORIZONTAL_JUMP_SPEED -
+            MIN_HORIZONTAL_JUMP_SPEED
+          ) * power
+        );
+
+        this.vy = -verticalSpeed;
+        this.vx = horizontalSpeed * this.facing;
+
+        this.onGround = false;
+        this.currentPlatform = null;
+
+        this.charging = false;
+        this.chargeTime = 0.0;
+      }
+
+      applySideBounce(hitSide) {
+        const speed = Math.max(
+          Math.abs(this.vx) * WALL_BOUNCE_FACTOR,
+          180.0
+        );
+
+        if (hitSide > 0) {
+          this.vx = -speed;
+          this.lastBounceSide = 1;
+        } else {
+          this.vx = speed;
+          this.lastBounceSide = -1;
+        }
+
+        this.vy = Math.max(
+          this.vy - WALL_BOUNCE_VERTICAL_KICK,
+          -MAX_BOUNCE_UPWARD_SPEED
+        );
+
+        this.onGround = false;
+        this.currentPlatform = null;
+
+        this.bounceFlashTimer = 0.18;
+      }
+
+      update(
+        dt,
+        platforms,
+        blocks,
+        leftPressed,
+        rightPressed
+      ) {
+        if (this.bounceFlashTimer > 0.0) {
+          this.bounceFlashTimer = Math.max(
+            0.0,
+            this.bounceFlashTimer - dt
+          );
+        }
+
+        let movementDirection = 0;
+
+        if (leftPressed && !rightPressed) {
+          movementDirection = -1;
+        } else if (rightPressed && !leftPressed) {
+          movementDirection = 1;
+        }
+
+        if (movementDirection !== 0) {
+          this.facing = movementDirection;
+        }
+
+        if (this.onGround) {
+          if (this.charging) {
+            this.vx = 0.0;
+          } else if (movementDirection !== 0) {
+            this.vx = moveTowards(
+              this.vx,
+              movementDirection * MAX_RUN_SPEED,
+              GROUND_ACCELERATION * dt
+            );
+          } else {
+            this.vx = moveTowards(
+              this.vx,
+              0.0,
+              GROUND_FRICTION * dt
+            );
+          }
+        }
+
+        if (this.charging && this.onGround) {
+          this.chargeTime = Math.min(
+            this.chargeTime + dt,
+            MAX_CHARGE_TIME
+          );
+        }
+
+        this.vy += GRAVITY * dt;
+
+
+        // ----------------------------------------------------
+        // Horizontal movement and side collisions
+        // ----------------------------------------------------
+
+        let oldRect = this.rect;
+
+        this.x += this.vx * dt;
+
+        if (this.x < 0) {
+          this.x = 0;
+
+          if (this.vx < 0) {
+            this.applySideBounce(-1);
+          }
+        } else if (
+          this.x + PLAYER_WIDTH > WORLD_WIDTH
+        ) {
+          this.x = WORLD_WIDTH - PLAYER_WIDTH;
+
+          if (this.vx > 0) {
+            this.applySideBounce(1);
+          }
+        }
+
+        let currentRect = this.rect;
+
+        for (const platform of platforms) {
+          const p = platform.rect;
+
+          const verticalOverlap = (
+            currentRect.y + currentRect.h > p.y &&
+            currentRect.y < p.y + p.h
+          );
+
+          if (!verticalOverlap) {
+            continue;
+          }
+
+          const crossedLeftSide = (
+            this.vx > 0 &&
+            oldRect.x + oldRect.w <= p.x &&
+            currentRect.x + currentRect.w >= p.x
+          );
+
+          if (crossedLeftSide) {
+            this.x = p.x - PLAYER_WIDTH;
+            this.vx = 0.0;
+            currentRect = this.rect;
+            continue;
+          }
+
+          const crossedRightSide = (
+            this.vx < 0 &&
+            oldRect.x >= p.x + p.w &&
+            currentRect.x <= p.x + p.w
+          );
+
+          if (crossedRightSide) {
+            this.x = p.x + p.w;
+            this.vx = 0.0;
+            currentRect = this.rect;
+          }
+        }
+
+        currentRect = this.rect;
+
+        for (const block of blocks) {
+          const b = block.rect;
+
+          if (!rectsOverlap(currentRect, b)) {
+            continue;
+          }
+
+          if (
+            this.vx > 0 &&
+            oldRect.x + oldRect.w <= b.x
+          ) {
+            this.x = b.x - PLAYER_WIDTH;
+            this.applySideBounce(1);
+            currentRect = this.rect;
+          } else if (
+            this.vx < 0 &&
+            oldRect.x >= b.x + b.w
+          ) {
+            this.x = b.x + b.w;
+            this.applySideBounce(-1);
+            currentRect = this.rect;
+          }
+        }
+
+
+        // ----------------------------------------------------
+        // Vertical movement and top/bottom collisions
+        // ----------------------------------------------------
+
+        oldRect = this.rect;
+
+        this.y += this.vy * dt;
+
+        let newRect = this.rect;
+
+        this.onGround = false;
+        this.currentPlatform = null;
+
+        for (const block of blocks) {
+          const b = block.rect;
+
+          if (!rectsOverlap(newRect, b)) {
+            continue;
+          }
+
+          if (
+            this.vy >= 0 &&
+            oldRect.y + oldRect.h <= b.y
+          ) {
+            this.y = b.y - PLAYER_HEIGHT;
+            this.vy = 0.0;
+            this.onGround = true;
+
+            newRect = this.rect;
+            break;
+          }
+
+          if (
+            this.vy < 0 &&
+            oldRect.y >= b.y + b.h
+          ) {
+            this.y = b.y + b.h;
+            this.vy = Math.abs(this.vy)
+              * CEILING_BOUNCE_FACTOR;
+
+            newRect = this.rect;
+            break;
+          }
+        }
+
+        if (!this.onGround) {
+          for (const platform of platforms) {
+            const p = platform.rect;
+
+            const horizontalOverlap = (
+              newRect.x + newRect.w > p.x &&
+              newRect.x < p.x + p.w
+            );
+
+            if (!horizontalOverlap) {
+              continue;
+            }
+
+            const crossedTop = (
+              this.vy >= 0 &&
+              oldRect.y + oldRect.h <= p.y &&
+              newRect.y + newRect.h >= p.y
+            );
+
+            if (crossedTop) {
+              this.y = p.y - PLAYER_HEIGHT;
+              this.vy = 0.0;
+
+              this.onGround = true;
+              this.currentPlatform = platform;
+
+              newRect = this.rect;
+              break;
+            }
+
+            const crossedUnderside = (
+              this.vy < 0 &&
+              oldRect.y >= p.y + p.h &&
+              newRect.y <= p.y + p.h
+            );
+
+            if (crossedUnderside) {
+              this.y = p.y + p.h;
+              this.vy = 0.0;
+
+              this.onGround = false;
+              this.currentPlatform = null;
+
+              newRect = this.rect;
+              break;
+            }
+          }
+        }
+      }
+
+      draw(ctx, cameraY) {
+        const drawX = Math.round(this.x);
+        const drawY = Math.round(this.y - cameraY);
+
+        let compression = 0;
+
+        if (this.charging) {
+          const ratio = clamp(
+            this.chargeTime / MAX_CHARGE_TIME,
+            0.0,
+            1.0
+          );
+
+          compression = Math.trunc(10 * ratio);
+        }
+
+        const bodyRect = {
+          x: drawX,
+          y: drawY + compression,
+          w: PLAYER_WIDTH,
+          h: PLAYER_HEIGHT - compression
+        };
+
+        roundedRectPath(
+          ctx,
+          bodyRect.x,
+          bodyRect.y,
+          bodyRect.w,
+          bodyRect.h,
+          6
+        );
+
+        ctx.fillStyle = COLORS.player;
+        ctx.fill();
+
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = COLORS.playerOutline;
+        ctx.stroke();
+
+        const eyeX = this.facing > 0
+          ? bodyRect.x + bodyRect.w - 10
+          : bodyRect.x + 10;
+
+        const eyeY = bodyRect.y + 15;
+
+        ctx.beginPath();
+        ctx.arc(eyeX, eyeY, 3, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS.black;
+        ctx.fill();
+
+        const noseY = bodyRect.y + 23;
+
+        ctx.beginPath();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = COLORS.playerOutline;
+
+        if (this.facing > 0) {
+          ctx.moveTo(
+            bodyRect.x + bodyRect.w - 2,
+            noseY
+          );
+
+          ctx.lineTo(
+            bodyRect.x + bodyRect.w + 5,
+            noseY
+          );
+        } else {
+          ctx.moveTo(
+            bodyRect.x + 2,
+            noseY
+          );
+
+          ctx.lineTo(
+            bodyRect.x - 5,
+            noseY
+          );
+        }
+
+        ctx.stroke();
+
+        if (this.bounceFlashTimer > 0.0) {
+          ctx.beginPath();
+          ctx.arc(
+            bodyRect.x + bodyRect.w / 2,
+            bodyRect.y + bodyRect.h / 2,
+            30,
+            0,
+            Math.PI * 2
+          );
+
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = COLORS.bounce;
+          ctx.stroke();
+        }
+      }
+    }
+
+
+    // ========================================================
+    // UI / DRAWING
+    // ========================================================
+
+    function drawBackground(ctx, cameraY) {
+      ctx.fillStyle = COLORS.sky;
+      ctx.fillRect(
+        0,
+        0,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT
+      );
+
+      for (let i = 0; i < 70; i += 1) {
+        const x = (i * 193) % SCREEN_WIDTH;
+
+        const screenY = positiveModulo(
+          i * 317 - cameraY * 0.20,
+          SCREEN_HEIGHT
+        );
+
+        const radius = i % 4 === 0 ? 2 : 1;
+
+        ctx.beginPath();
+        ctx.arc(x, screenY, radius, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS.sky2;
+        ctx.fill();
+      }
+    }
+
+
+    function getSectionName(height) {
+      if (height < 100) return "THE FOOTHILLS";
+      if (height < 200) return "THE CROSSING";
+      if (height < 300) return "EDGE BAIT";
+      if (height < 400) return "BOUNCE SHAFT";
+      if (height < 500) return "THE NEEDLE";
+      if (height < 600) return "SECOND CROSSING";
+      if (height < 700) return "THE SAW";
+      if (height < 800) return "LEFT WALL REBOUND";
+      if (height < 900) return "PUNISHMENT ZONE";
+      return "FINAL SIDEWAYS GAUNTLET";
+    }
+
+
+    function drawText(
+      ctx,
+      text,
+      x,
+      y,
+      size,
+      color,
+      bold = false,
+      align = "left"
+    ) {
+      ctx.font = `${bold ? "700 " : ""}${size}px Consolas, "Courier New", monospace`;
+      ctx.fillStyle = color;
+      ctx.textAlign = align;
+      ctx.textBaseline = "top";
+      ctx.fillText(text, x, y);
+    }
+
+
+    function drawUI(
+      ctx,
+      player,
+      currentHeight,
+      recordHeight
+    ) {
+      drawText(
+        ctx,
+        "A/D: run and face   SPACE: charge jump   Release: jump   Walls: rebound   R: restart",
+        20,
+        20,
+        16,
+        COLORS.white
+      );
+
+      drawText(
+        ctx,
+        `${Math.round(currentHeight)} / 1000 m`,
+        SCREEN_WIDTH - 20,
+        20,
+        26,
+        COLORS.white,
+        true,
+        "right"
+      );
+
+      drawText(
+        ctx,
+        `Record: ${Math.round(recordHeight)} m`,
+        SCREEN_WIDTH - 20,
+        58,
+        16,
+        COLORS.yellow,
+        false,
+        "right"
+      );
+
+      drawText(
+        ctx,
+        getSectionName(currentHeight),
+        20,
+        52,
+        16,
+        COLORS.white
+      );
+
+      const progress = clamp(
+        currentHeight / MAX_HEIGHT_METERS,
+        0.0,
+        1.0
+      );
+
+      const barX = 20;
+      const barY = 82;
+      const barWidth = 220;
+      const barHeight = 10;
+
+      ctx.fillStyle = COLORS.chargeBg;
+      ctx.fillRect(
+        barX,
+        barY,
+        barWidth,
+        barHeight
+      );
+
+      ctx.fillStyle = COLORS.yellow;
+      ctx.fillRect(
+        barX,
+        barY,
+        Math.trunc(barWidth * progress),
+        barHeight
+      );
+
+      if (player.charging) {
+        const ratio = clamp(
+          player.chargeTime / MAX_CHARGE_TIME,
+          0.0,
+          1.0
+        );
+
+        const chargeWidth = 260;
+        const chargeHeight = 24;
+
+        const x = SCREEN_WIDTH / 2 - chargeWidth / 2;
+        const y = SCREEN_HEIGHT - 55;
+
+        roundedRectPath(
+          ctx,
+          x,
+          y,
+          chargeWidth,
+          chargeHeight,
+          6
+        );
+
+        ctx.fillStyle = COLORS.chargeBg;
+        ctx.fill();
+
+        const filledWidth = chargeWidth * ratio;
+
+        if (filledWidth > 0) {
+          roundedRectPath(
+            ctx,
+            x,
+            y,
+            filledWidth,
+            chargeHeight,
+            6
+          );
+
+          ctx.fillStyle = COLORS.chargeFill;
+          ctx.fill();
+        }
+
+        drawText(
+          ctx,
+          "JUMP POWER",
+          SCREEN_WIDTH / 2,
+          y - 24,
+          16,
+          COLORS.white,
+          false,
+          "center"
+        );
+      }
+    }
+
+
+    function drawCenteredOverlay(
+      ctx,
+      title,
+      subtitle,
+      footer,
+      titleColor
+    ) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.63)";
+      ctx.fillRect(
+        0,
+        0,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT
+      );
+
+      drawText(
+        ctx,
+        title,
+        SCREEN_WIDTH / 2,
+        SCREEN_HEIGHT / 2 - 70,
+        52,
+        titleColor,
+        true,
+        "center"
+      );
+
+      drawText(
+        ctx,
+        subtitle,
+        SCREEN_WIDTH / 2,
+        SCREEN_HEIGHT / 2 + 5,
+        26,
+        COLORS.white,
+        true,
+        "center"
+      );
+
+      drawText(
+        ctx,
+        footer,
+        SCREEN_WIDTH / 2,
+        SCREEN_HEIGHT / 2 + 60,
+        16,
+        COLORS.white,
+        false,
+        "center"
+      );
+    }
+
+
+    // ========================================================
+    // GAME SETUP
+    // ========================================================
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const { platforms, blocks } = createLevel();
+
+    const goalPlatform = platforms.find(
+      platform => platform.isGoal
+    );
+
+    let spawnX;
+    let spawnY;
+
+    if (DEBUG_START_HEIGHT === null) {
+      spawnX = (
+        SCREEN_WIDTH / 2 -
+        PLAYER_WIDTH / 2
+      );
+
+      spawnY = (
+        START_GROUND_Y -
+        PLAYER_HEIGHT
+      );
+    } else {
+      const targetY = heightToWorldY(
+        DEBUG_START_HEIGHT
+      );
+
+      const candidates = platforms.filter(
+        platform => Math.abs(
+          platform.rect.y - targetY
+        ) <= 2
+      );
+
+      if (candidates.length === 0) {
+        throw new Error(
+          `No platform found at ${DEBUG_START_HEIGHT} m`
+        );
+      }
+
+      const spawnPlatform = candidates.reduce(
+        (best, platform) => {
+          const bestDistance = Math.abs(
+            best.rect.x + best.rect.w / 2 -
+            DEBUG_START_X
+          );
+
+          const currentDistance = Math.abs(
+            platform.rect.x + platform.rect.w / 2 -
+            DEBUG_START_X
+          );
+
+          return currentDistance < bestDistance
+            ? platform
+            : best;
+        }
+      );
+
+      spawnX = (
+        spawnPlatform.rect.x +
+        spawnPlatform.rect.w / 2 -
+        PLAYER_WIDTH / 2
+      );
+
+      spawnY = (
+        spawnPlatform.rect.y -
+        PLAYER_HEIGHT
+      );
+    }
+
+    const player = new Player(spawnX, spawnY);
+
+    let cameraY = Math.min(
+      spawnY - SCREEN_HEIGHT * 0.62,
+      0.0
+    );
+
+    let highestHeight = Math.max(
+      0.0,
+      (
+        START_GROUND_Y -
+        (
+          spawnY +
+          PLAYER_HEIGHT
+        )
+      ) / 10.0
+    );
+
+    let currentHeight = highestHeight;
+
+    let won = false;
+    let paused = false;
+
+    const keys = new Set();
+
+
+    function resetPlayer() {
+      player.reset();
+
+      cameraY = Math.min(
+        player.y - SCREEN_HEIGHT * 0.62,
+        0.0
+      );
+
+      won = false;
+    }
+
+
+    function isLeftPressed() {
+      return (
+        keys.has("ArrowLeft") ||
+        keys.has("KeyA")
+      );
+    }
+
+    function isRightPressed() {
+      return (
+        keys.has("ArrowRight") ||
+        keys.has("KeyD")
+      );
+    }
+
+
+    window.addEventListener("keydown", event => {
+      if (
+        event.code === "ArrowLeft" ||
+        event.code === "ArrowRight" ||
+        event.code === "Space"
+      ) {
+        event.preventDefault();
+      }
+
+      keys.add(event.code);
+
+      if (event.repeat) {
+        return;
+      }
+
+      if (event.code === "Escape") {
+        paused = !paused;
+        return;
+      }
+
+      if (event.code === "KeyR") {
+        resetPlayer();
+        return;
+      }
+
+      if (event.code === "Space" && !won && !paused) {
+        player.startCharge();
+      }
+    });
+
+
+    window.addEventListener("keyup", event => {
+      if (
+        event.code === "ArrowLeft" ||
+        event.code === "ArrowRight" ||
+        event.code === "Space"
+      ) {
+        event.preventDefault();
+      }
+
+      keys.delete(event.code);
+
+      if (event.code === "Space" && !won && !paused) {
+        player.releaseJump();
+      }
+    });
+
+
+    window.addEventListener("blur", () => {
+      keys.clear();
+
+      if (player.charging) {
+        player.charging = false;
+        player.chargeTime = 0.0;
+      }
+
+      paused = true;
+    });
+
+
+    canvas.addEventListener("pointerdown", () => {
+      canvas.focus();
+    });
+
+    canvas.focus();
+
+
+    // ========================================================
+    // GAME LOOP
+    // ========================================================
+
+    let previousTime = performance.now();
+
+    function frame(now) {
+      let dt = (now - previousTime) / 1000.0;
+      previousTime = now;
+
+      dt = Math.min(dt, 1.0 / 30.0);
+
+      if (!paused && !won) {
+        player.update(
+          dt,
+          platforms,
+          blocks,
+          isLeftPressed(),
+          isRightPressed()
+        );
+      }
+
+      const playerFeetY = (
+        player.y +
+        PLAYER_HEIGHT
+      );
+
+      currentHeight = Math.max(
+        0.0,
+        (
+          START_GROUND_Y -
+          playerFeetY
+        ) / 10.0
+      );
+
+      currentHeight = Math.min(
+        currentHeight,
+        MAX_HEIGHT_METERS
+      );
+
+      highestHeight = Math.max(
+        highestHeight,
+        currentHeight
+      );
+
+      if (
+        player.onGround &&
+        player.currentPlatform === goalPlatform
+      ) {
+        won = true;
+      }
+
+      if (!paused) {
+        const targetCameraY = Math.min(
+          player.y - SCREEN_HEIGHT * 0.62,
+          0.0
+        );
+
+        cameraY += (
+          targetCameraY -
+          cameraY
+        ) * Math.min(
+          CAMERA_SMOOTHING * dt,
+          1.0
+        );
+      }
+
+      if (player.y > 1000) {
+        resetPlayer();
+      }
+
+      drawBackground(ctx, cameraY);
+
+      for (const platform of platforms) {
+        platform.draw(ctx, cameraY);
+      }
+
+      for (const block of blocks) {
+        block.draw(ctx, cameraY);
+      }
+
+      player.draw(ctx, cameraY);
+
+      drawUI(
+        ctx,
+        player,
+        currentHeight,
+        highestHeight
+      );
+
+      if (won) {
+        drawCenteredOverlay(
+          ctx,
+          "1000 METERS!",
+          "You reached the summit",
+          "Press R to restart",
+          COLORS.green
+        );
+      } else if (paused) {
+        drawCenteredOverlay(
+          ctx,
+          "PAUSED",
+          "Press Esc to continue",
+          "R restarts from the selected spawn point",
+          COLORS.yellow
+        );
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
