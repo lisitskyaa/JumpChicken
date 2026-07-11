@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <title>1000m Hardcore Jump</title>
+  <title>Jump King Simple</title>
   <style>
     :root {
       color-scheme: dark;
@@ -227,7 +227,7 @@
     ></canvas>
     <div class="help">
       <kbd>A</kbd>/<kbd>D</kbd> or arrow keys — run and face,
-      <kbd>Space</kbd> — charge and release jump,
+      <kbd>Space</kbd> — hold to charge, release to jump,
       <kbd>R</kbd> — restart, <kbd>Esc</kbd> — pause.
     </div>
 
@@ -332,7 +332,6 @@
       player: "rgb(221, 181, 108)",
       playerOutline: "rgb(67, 49, 36)",
       chargeBg: "rgb(50, 50, 60)",
-      chargeFill: "rgb(230, 168, 62)",
       white: "rgb(240, 240, 240)",
       black: "rgb(15, 15, 18)",
       yellow: "rgb(240, 205, 90)",
@@ -943,17 +942,11 @@
         const drawX = Math.round(this.x);
         const drawY = Math.round(this.y - cameraY);
 
-        let compression = 0;
-
-        if (this.charging) {
-          const ratio = clamp(
-            this.chargeTime / MAX_CHARGE_TIME,
-            0.0,
-            1.0
-          );
-
-          compression = Math.trunc(10 * ratio);
-        }
+        // Experimental charging pose:
+        // one fixed crouch frame with no progressive animation.
+        const compression = this.charging
+          ? 10
+          : 0;
 
         const bodyRect = {
           x: drawX,
@@ -1164,58 +1157,6 @@
         barHeight
       );
 
-      if (player.charging) {
-        const ratio = clamp(
-          player.chargeTime / MAX_CHARGE_TIME,
-          0.0,
-          1.0
-        );
-
-        const chargeWidth = 260;
-        const chargeHeight = 24;
-
-        const x = SCREEN_WIDTH / 2 - chargeWidth / 2;
-        const y = SCREEN_HEIGHT - 55;
-
-        roundedRectPath(
-          ctx,
-          x,
-          y,
-          chargeWidth,
-          chargeHeight,
-          6
-        );
-
-        ctx.fillStyle = COLORS.chargeBg;
-        ctx.fill();
-
-        const filledWidth = chargeWidth * ratio;
-
-        if (filledWidth > 0) {
-          roundedRectPath(
-            ctx,
-            x,
-            y,
-            filledWidth,
-            chargeHeight,
-            6
-          );
-
-          ctx.fillStyle = COLORS.chargeFill;
-          ctx.fill();
-        }
-
-        drawText(
-          ctx,
-          "JUMP POWER",
-          SCREEN_WIDTH / 2,
-          y - 24,
-          16,
-          COLORS.white,
-          false,
-          "center"
-        );
-      }
     }
 
 
